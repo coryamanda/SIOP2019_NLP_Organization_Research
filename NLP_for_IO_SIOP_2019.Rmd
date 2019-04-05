@@ -4,6 +4,7 @@ author: "Cory Kind"
 date: "April 5, 2019"
 output:
   html_document: default
+  word_document: default
 ---
 
 
@@ -114,8 +115,9 @@ nlp_data$emotional_exhaustion_time2  = (as.numeric(nlp_data$Answer.frustrated) +
 nlp_data$Answer.want_stay <- ordered(nlp_data$Answer.want_stay, levels = agree_scale)
 nlp_data$Answer.intend_look <- ordered(nlp_data$Answer.intend_look, levels = agree_scale)
 nlp_data$Answer.intend_stay <- ordered(nlp_data$Answer.intend_stay, levels = agree_scale)
+#Note that intend to look is reversed
 nlp_data$intend_stay_time2  = (as.numeric(nlp_data$Answer.want_stay) +
-                                    as.numeric(nlp_data$Answer.intend_look) +
+                                    8 - as.numeric(nlp_data$Answer.intend_look) +
                                     as.numeric(nlp_data$Answer.intend_stay))/3
 ```
 
