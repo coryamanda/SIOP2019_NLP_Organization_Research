@@ -1,0 +1,331 @@
+---
+title: "SIOP NLP Seminar 2019"
+author: "Cory Kind"
+date: "April 5, 2019"
+output:
+  html_document: default
+---
+
+
+### Set-up
+
+```{r, message=FALSE}
+#Clear your directory
+rm(list = ls())
+
+#Load relevant packages
+library(tm)
+library(ggplot2)
+library(topicmodels)
+library(dplyr)
+library(stringi)
+library(ggcorrplot)
+library(ldatuning)
+library(caret)
+library(glmnet)
+```
+
+### Define helper functions
+
+```{r, message=FALSE}
+#Input is a dataframe
+#Output is the same dataframe in "corpus" format
+create_corpus <- function(d_input) {
+  ds <- DataframeSource(d_input)
+  VCorpus(ds)
+}
+
+#Input is a corpus
+#Output is a cleaned DTM
+#Default paratmeters listed in function definition, can be overriden by specifying parameters when the function is called
+create_cleaned_dtm <- function(docs,
+                               convertToLower = TRUE,
+                               stemWords = TRUE,
+                               removePunc = TRUE,
+                               removeStopwords = TRUE) {
+  if (removePunc) docs <- tm_map(docs, removePunctuation, preserve_intra_word_dashes = TRUE)
+  if (convertToLower) docs <- tm_map(docs, tolower)
+  if (removeStopwords) docs <- tm_map(docs, removeWords, stopwords("english"))
+  docs <- tm_map(docs, stripWhitespace)
+  docs <- tm_map(docs, PlainTextDocument)
+  
+  if (stemWords) docs <- tm_map(docs, stemDocument)
+  dtm <- DocumentTermMatrix(docs)
+  dtm
+}
+```
+
+### Load data, clean up scales
+
+```{r}
+#Note: Change to your own folder where the data is stored
+setwd("C:/Users/ckind/Desktop")
+nlp_data <- read.csv("NLP Tutorial Data.csv",
+                     na.strings = c("Not Applicable","NA","select one"))
+
+#Set factors
+frequency_scale <- c("Never",
+                     "Rarely",
+                     "Occasionally",
+                     "Sometimes",
+                     "Frequently",
+                     "Nearly Always",
+                     "Always")
+often_scale <- c("Never",
+                "A few times a year",
+                "Monthly",
+                "A few times a month",
+                "Every week",
+                "A few times a week",
+                "Every day")
+agree_scale <- c("Strongly Disagree",
+                 "Disagree",
+                 "Somewhat Disagree",
+                 "Neither Agree nor Disagree",
+                 "Somewhat Agree",
+                 "Agree",
+                 "Strongly Agree")
+
+#Work engagement scales
+nlp_data$Answer.time_flies <- ordered(nlp_data$Answer.time_flies, levels = frequency_scale)
+nlp_data$Answer.engrossed <- ordered(nlp_data$Answer.engrossed, levels = frequency_scale)
+nlp_data$Answer.strong <- ordered(nlp_data$Answer.strong, levels = frequency_scale)
+nlp_data$Answer.energized <- ordered(nlp_data$Answer.energized, levels = frequency_scale)
+nlp_data$Answer.proud <- ordered(nlp_data$Answer.proud, levels = frequency_scale)
+nlp_data$Answer.meaningful <- ordered(nlp_data$Answer.meaningful, levels = frequency_scale)
+nlp_data$work_engagement_time2  = (as.numeric(nlp_data$Answer.time_flies) +
+                            as.numeric(nlp_data$Answer.engrossed) +
+                            as.numeric(nlp_data$Answer.strong) +
+                            as.numeric(nlp_data$Answer.energized) +
+                            as.numeric(nlp_data$Answer.proud) +
+                            as.numeric(nlp_data$Answer.meaningful))/7
+nlp_data$absorption_time2  = (as.numeric(nlp_data$Answer.time_flies) +
+                            as.numeric(nlp_data$Answer.engrossed))/2
+
+#Emotional exhaustion scales
+nlp_data$Answer.frustrated <- ordered(nlp_data$Answer.frustrated, levels = often_scale)
+nlp_data$Answer.burnedout <- ordered(nlp_data$Answer.burnedout, levels = often_scale)
+nlp_data$Answer.fatigued <- ordered(nlp_data$Answer.fatigued, levels = often_scale)
+nlp_data$emotional_exhaustion_time2  = (as.numeric(nlp_data$Answer.frustrated) +
+                               as.numeric(nlp_data$Answer.burnedout) +
+                               as.numeric(nlp_data$Answer.fatigued))/3
+
+#Intent to stay scales
+nlp_data$Answer.want_stay <- ordered(nlp_data$Answer.want_stay, levels = agree_scale)
+nlp_data$Answer.intend_look <- ordered(nlp_data$Answer.intend_look, levels = agree_scale)
+nlp_data$Answer.intend_stay <- ordered(nlp_data$Answer.intend_stay, levels = agree_scale)
+nlp_data$intend_stay_time2  = (as.numeric(nlp_data$Answer.want_stay) +
+                                    as.numeric(nlp_data$Answer.intend_look) +
+                                    as.numeric(nlp_data$Answer.intend_stay))/3
+```
+
+
+### Exploratory data analysis of key variables
+
+Histogram of Emotional Exhaustion
+```{r}
+ggplot(nlp_data, aes(x=emotional_exhaustion_time2)) + geom_histogram(binwidth = 1) + labs(title = "Emotional Exhaustion (Time 2)", x = "")
+```
+
+Histogram of Intent to Stay
+```{r}
+ggplot(nlp_data, aes(x=intend_stay_time2)) + geom_histogram(binwidth = 0.5) + labs(title = "Intent to Stay (Time 2)", x = "")
+```
+
+Histogram of Work Engagement
+```{r}
+ggplot(nlp_data, aes(x=work_engagement_time2)) + geom_histogram(binwidth = 0.5) + labs(title = "Work Engagement (Time 2)", x = "")
+```
+
+Checking correlation analysis of the different components of the work engagement scale
+
+```{r}
+ggcorrplot(cor(data.matrix(nlp_data[,c("Answer.time_flies",
+                                       "Answer.engrossed", "Answer.strong",
+                                       "Answer.energized", "Answer.proud",
+                                       "Answer.meaningful")]),
+                                        use = "pairwise.complete.obs"))
+```
+
+### Clean the text data and convert to DTM
+
+Creating a cleaned corpus for the enjoyment text
+```{r}
+#Note that we're taking out cases where we have missing data
+docs_enjoy <- data.frame(doc_id = nlp_data$WorkerId[!is.na(nlp_data$Answer.essay1)],
+                         text = nlp_data$Answer.essay1[!is.na(nlp_data$Answer.essay1)],
+                         stringsAsFactors = FALSE)
+
+#Create corpus
+corpus_enjoy <- create_corpus(docs_enjoy)
+
+dtm_enjoy <- create_cleaned_dtm(corpus_enjoy)
+dtm_enjoy
+
+```
+
+To explore how parameters can be used to pipeline cleaning processes, here are examples of DTM outputs with different parameters
+```{r}
+create_cleaned_dtm(corpus_enjoy, removeStopwords = FALSE)
+```
+```{r}
+create_cleaned_dtm(corpus_enjoy, convertToLower = FALSE)
+```
+
+```{r}
+create_cleaned_dtm(corpus_enjoy, removeStopwords = FALSE, stemWords = FALSE)
+```
+
+Exploring the DTM by looking at the most common words
+
+Note that these frequencies are the the number of times the word is used in the corpus, NOT the number of people who used it. The DTM represents counts (1+) not a binary representation of whether the word was used at all (0/1).
+```{r}
+#EDA and additional optional cleaning steps to reduce the number of words
+freq <- colSums(as.matrix(dtm_enjoy))
+
+dtm_enjoy <- removeSparseTerms(dtm_enjoy, 0.99) #This drops terms that are very infrequently used
+freq <- colSums(as.matrix(dtm_enjoy)) #Generates a frequency table
+
+freq <- sort(freq, decreasing = TRUE)
+freq[order(freq, decreasing = TRUE)][1:100] #100 most common words in the enjoyment text 
+```
+
+### Unsupervised modeling
+
+Identify the optimum number of topics for the enjoyment text using ldatuning package
+
+```{r}
+#Model parameters
+#NOTE: Setting the seed effectively "freezes"" the randomness so that the analysis is the same across multiple runs of the code, that isn't a parameter to optimize
+result_enjoy <- FindTopicsNumber(
+  dtm_enjoy,
+  topics = seq(from = 2, to = 10, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 248), 
+  verbose = TRUE
+)
+
+```
+
+```{r}
+FindTopicsNumber_plot(result_enjoy)
+```
+
+
+Repeat cleaning steps for the absorption text and identify the optimum number of topics using ldatuning package
+
+```{r}
+#Cleaning steps (mostly the same as above)
+docs_absorption <- data.frame(doc_id = nlp_data$WorkerId[!is.na(nlp_data$Answer.essay2)],
+                         text = nlp_data$Answer.essay2[!is.na(nlp_data$Answer.essay2)],
+                         stringsAsFactors = FALSE)
+corpus_absorption <- create_corpus(docs_absorption)
+dtm_absorption <- create_cleaned_dtm(corpus_absorption, stemWords = FALSE)
+dtm_absorption <- removeSparseTerms(dtm_absorption, 0.9) #Removing more sparse terms this time
+
+result_absorption <- FindTopicsNumber(
+  dtm_absorption,
+  topics = seq(from = 2, to = 10, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009",
+              "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 248),
+  verbose = TRUE
+)
+
+```
+
+```{r}
+FindTopicsNumber_plot(result_absorption)
+```
+
+### Supervised modeling
+
+Predict absorption at time 2 given the text provided in the absorption prompt
+
+```{r}
+dtm_absorption <- create_cleaned_dtm(corpus_absorption, stemWords = FALSE)
+
+#NOTE: Setting the sparsity term is a very brute-force way to remove terms. In a real project, there are better strategies for feature reduction (e.g., dictionary creation, PCA, stemming)
+dtm_absorption <- removeSparseTerms(dtm_absorption, 0.8)
+
+#Convert to matrix and add the target variable (absoprtion time 2)
+absorption_matrix <- as.matrix(dtm_absorption)
+absorption_matrix <- cbind(absorption_matrix, nlp_data$absorption_time2)
+
+absorption_dataframe <- as.data.frame(absorption_matrix)
+names(absorption_dataframe)[ncol(absorption_dataframe)] <- "absorption_time2"
+
+fitControl <- trainControl(## 10-fold CV
+  method = "cv",
+  number = 10,
+  savePredictions = TRUE
+)
+
+#Create linear regression
+lreg <- caret::train(absorption_time2 ~., data = absorption_dataframe, method="lm", trControl=fitControl)
+
+lreg
+```
+
+```{r}
+summary(lreg)
+```
+
+```{r}
+varImp(lreg)
+```
+
+
+### Types of Validity
+
+
+Correlate predicted scores with actual absorption numbers (construct validity)
+
+```{r}
+predictions <- predict(lreg, newdata=absorption_dataframe)
+
+cor(as.numeric(predictions), as.numeric(nlp_data$absorption_time2))
+
+```
+
+
+Predicted scores from previous step correlated with time 2 intent to stay (criterion validity)
+
+```{r}
+cor(as.numeric(predictions), as.numeric(nlp_data$intend_stay_time2)) 
+
+```
+
+Analysis of the results of the topic models on the absorption text and enjoyment text (content validity)
+
+```{r}
+#Absorption text
+k <- 4 #Number of topics you want to be looking for
+
+ldaOut <-LDA(dtm_absorption, k, method="Gibbs", control=list(seed = 248, best=TRUE)) #Run the model
+ldaOut.terms <- as.matrix(terms(ldaOut,10))
+ldaOut.terms
+
+```
+
+Enjoyment 
+
+```{r}
+#Enjoyment text
+k <- 3 #Number of topics you want to be looking for
+
+ldaOut <-LDA(dtm_enjoy, k, method="Gibbs", control=list(seed = 248, best=TRUE)) #Run the model
+ldaOut.terms <- as.matrix(terms(ldaOut,10))
+ldaOut.terms
+
+```
+
+Correlation between time 2 quant absorption and time 2 quant intent to stay scores
+
+```{r}
+cor(nlp_data$absorption_time2, nlp_data$intend_stay_time2,
+    use = "pairwise.complete.obs")
+```
+
